@@ -2,12 +2,14 @@
     "compilerOptions": {
         "target": "esnext",
         "module": "nodenext",
+        "rootDir": "src",
         "outDir": "dist",
         "esModuleInterop": true,
         "strict": true,
+        "declaration": true,
         "moduleResolution": "nodenext",
         "types": ["node", "vitest/globals"]
     },
-    "include": ["**/*.ts"],
+    "include": ["src/**/*.ts"],
     "exclude": ["node_modules", "dist"]
 }

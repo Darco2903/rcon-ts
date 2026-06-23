@@ -19,6 +19,11 @@ export class RCON {
     private queue: PendingPacket[];
     private pending: PendingCommand | null;
 
+    private readonly boundHandlePacket: (data: Buffer) => void;
+    private readonly boundOnSocketError: (err: Error) => void;
+    private readonly boundHandleClose: () => void;
+    private splitter: SplitterTransform | null = null;
+
     public constructor(host: string, port: number, password: string) {
         this.host = host;
         this.port = port;
@@ -27,6 +32,10 @@ export class RCON {
         this.state = "idle";
         this.queue = [];
         this.pending = null;
+        this.boundHandlePacket = this.handlePacket.bind(this);
+        this.boundOnSocketError = this.onSocketError.bind(this);
+        this.boundHandleClose = this.handleClose.bind(this);
+        this.splitter = null;
     }
 
     public get currentState(): RCONState {
@@ -124,21 +133,25 @@ export class RCON {
     }
 
     private setupSocketListeners(socket: Socket): void {
+        this.splitter = new SplitterTransform();
         socket
             //
-            .pipe(new SplitterTransform())
-            .on("data", this.handlePacket.bind(this));
+            .pipe(this.splitter)
+            .on("data", this.boundHandlePacket);
 
-        socket.on("error", this.onSocketError.bind(this));
-        socket.once("close", this.handleClose.bind(this));
+        socket.on("error", this.boundOnSocketError);
+        socket.once("close", this.boundHandleClose);
     }
 
     private teardownSocketListeners(): void {
         if (this.socket !== null) {
-            this.socket.off("data", this.handlePacket.bind(this));
-            this.socket.off("error", this.onSocketError.bind(this));
-            this.socket.off("close", this.handleClose.bind(this));
+            this.socket.off("close", this.boundHandleClose);
+            if (this.splitter !== null) {
+                this.socket.unpipe(this.splitter);
+                this.splitter.off("data", this.boundHandlePacket);
+            }
         }
+        this.splitter = null;
     }
 
     private handleClose(): void {

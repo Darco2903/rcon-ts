@@ -8,6 +8,7 @@ tsconfig.json
 tests/
 vitest.config.ts
 .github/
+pnpm-workspace.yaml
 
 # tarballs
 darco2903-rcon-ts-*.tgz
