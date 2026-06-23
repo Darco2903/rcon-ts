@@ -1,0 +1,13 @@
+# dev
+.vscode/
+.gitattributes
+TODO.md
+src/
+tsconfig.build.json
+tsconfig.json
+tests/
+vitest.config.ts
+.github/
+
+# tarballs
+darco2903-rcon-ts-*.tgz

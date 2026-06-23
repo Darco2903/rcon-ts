@@ -1,0 +1,35 @@
+{
+  "name": "@darco2903/rcon-ts",
+  "version": "0.0.0",
+  "author": "Darco2903",
+  "description": "",
+  "keywords": [],
+  "license": "ISC",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "repository": {
+    "url": "https://github.com/Darco2903/rcon-ts.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepack": "pnpm build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rimraf -g dist darco2903-rcon-ts-*.tgz"
+  },
+  "dependencies": {
+    "neverthrow": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "rimraf": "^6.1.3",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

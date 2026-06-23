@@ -1,0 +1,13 @@
+{
+    "compilerOptions": {
+        "target": "esnext",
+        "module": "nodenext",
+        "outDir": "dist",
+        "esModuleInterop": true,
+        "strict": true,
+        "moduleResolution": "nodenext",
+        "types": ["node", "vitest/globals"]
+    },
+    "include": ["**/*.ts"],
+    "exclude": ["node_modules", "dist"]
+}
