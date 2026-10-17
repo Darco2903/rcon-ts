@@ -164,7 +164,7 @@ export class RCON extends TypedEmitterProtected<RCONEvents> {
         const onError = (err: Error) => {
             lastError = err;
             if (socket === this.socket) {
-                this.emit("socketError", err);
+                this._emit("socketError", err);
             }
         };
         const onClose = () => this.closeConnection(socket, lastError?.message ?? "closed by server");
@@ -245,7 +245,7 @@ export class RCON extends TypedEmitterProtected<RCONEvents> {
             this.sendNext();
         } else if (packet.id !== this.lastMarkerId) {
             // Packets carrying the last marker's id are expected: Source answers a marker with two packets.
-            this.emit("unexpectedPacket", packet);
+            this._emit("unexpectedPacket", packet);
         }
     }
 
