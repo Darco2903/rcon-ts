@@ -16,13 +16,14 @@ concurrency:
 permissions:
     contents: read
 
-env:
-    NODE_VERSION: 24
-
 jobs:
     test:
         runs-on: ubuntu-latest
         timeout-minutes: 10
+
+        strategy:
+            matrix:
+                node-version: [20, 22, 24] # keep in sync with "engines" in package.json
 
         steps:
             - name: Checkout code
@@ -31,14 +32,17 @@ jobs:
             - name: Install pnpm
               uses: pnpm/action-setup@v4
 
-            - name: Use Node.js ${{ env.NODE_VERSION }}
+            - name: Use Node.js ${{ matrix.node-version }}
               uses: actions/setup-node@v4
               with:
-                  node-version: ${{ env.NODE_VERSION }}
+                  node-version: ${{ matrix.node-version }}
                   cache: "pnpm"
 
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
+
+            - name: Type check
+              run: pnpm check
 
             - name: Run tests
               run: pnpm test

@@ -2,22 +2,47 @@
   "name": "@darco2903/rcon-ts",
   "version": "1.0.0",
   "author": "Darco2903",
-  "description": "",
-  "keywords": [],
-  "license": "ISC",
+  "description": "Minimal TypeScript client for the Source RCON protocol (Source engine games, Minecraft, ...), built on neverthrow",
+  "keywords": [
+    "rcon",
+    "source-rcon",
+    "srcds",
+    "minecraft",
+    "valve",
+    "typescript",
+    "neverthrow"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/Darco2903/rcon-ts#readme",
+  "bugs": {
+    "url": "https://github.com/Darco2903/rcon-ts/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Darco2903/rcon-ts.git"
+  },
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "type": "module",
-  "packageManager": "pnpm@12.14.0",
-  "repository": {
-    "url": "https://github.com/Darco2903/rcon-ts.git"
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@12.14.0",
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "build": "tsc",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p tests",
     "prepack": "pnpm build",
     "test": "vitest run",
     "test:watch": "vitest",
