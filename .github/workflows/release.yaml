@@ -1,0 +1,121 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - "v*" # Trigger on version tags
+
+# A new push cancels the previous run of the same branch
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    id-token: write
+    contents: write
+
+env:
+    NODE_VERSION: 24
+
+jobs:
+    init:
+        runs-on: ubuntu-latest
+
+        outputs:
+            pkg_version: ${{ steps.pkg.outputs.version }}
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v5
+
+            - name: Extract package.json fields
+              id: pkg
+              run: |
+                  echo "version=$(jq -r '.version' package.json)" >> $GITHUB_OUTPUT
+
+    #
+
+    check:
+        needs: [init]
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v5
+
+            - name: Check tag matches package.json version
+              run: |
+
+                  TAG_VERSION="${GITHUB_REF_NAME#v}"
+                  PKG_VERSION=${{ needs.init.outputs.pkg_version }}
+
+                  echo "Tag version: $TAG_VERSION"
+                  echo "Package version: $PKG_VERSION"
+
+                  if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+                    echo "❌ Tag version does not match package.json version"
+                    exit 1
+                  fi
+
+    #
+
+    test:
+        needs: [check]
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v5
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Use Node.js ${{ env.NODE_VERSION }}
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Run tests
+              run: pnpm test
+
+    #
+
+    release:
+        needs: [test]
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v5
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Use Node.js ${{ env.NODE_VERSION }}
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Pack project
+              run: pnpm pack
+
+            - name: Upload release asset
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: "*.tgz"
+                  generate_release_notes: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Publish to NPM
+              shell: bash
+              run: pnpm publish --access public --no-git-checks
