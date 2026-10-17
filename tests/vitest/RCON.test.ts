@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { Socket } from "net";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RCON } from "../../src/RCON.js";
 import { Packet } from "../../src/packet.js";
 import { MAX_PACKET_SIZE } from "../../src/SplitterTransform.js";
@@ -230,6 +231,40 @@ describe("RCON", () => {
             expect(result.isErr()).toBe(true);
         });
 
+        it("moves to 'closing' while disconnecting and refuses new commands and disconnects", async () => {
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            await rcon.connect();
+
+            const disconnectPromise = rcon.disconnect();
+
+            expect(rcon.currentState).toBe("closing");
+            expect(rcon.isReady).toBe(false);
+            expect((await rcon.sendCommand("late"))._unsafeUnwrapErr()).toMatch(/not ready/i);
+            expect((await rcon.disconnect())._unsafeUnwrapErr()).toMatch(/already disconnecting/i);
+            expect((await rcon.connect())._unsafeUnwrapErr()).toMatch(/currently disconnecting/i);
+
+            expect((await disconnectPromise).isOk()).toBe(true);
+            expect(rcon.currentState).toBe("closed");
+        });
+
+        it("returns an error if the socket fails to close gracefully, and still closes it", async () => {
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            await rcon.connect();
+
+            const socket = (rcon as unknown as { socket: Socket }).socket;
+            socket.end = ((cb: (err?: Error) => void) => {
+                process.nextTick(cb, new Error("boom"));
+                return socket;
+            }) as Socket["end"];
+
+            const result = await rcon.disconnect();
+
+            expect(result.isErr()).toBe(true);
+            expect(result._unsafeUnwrapErr()).toMatch(/boom/);
+            expect(rcon.currentState).toBe("closed");
+            expect(socket.destroyed).toBe(true);
+        });
+
         it("rejects queued commands during disconnection", async () => {
             const rcon = new RCON("127.0.0.1", port, "correct-password");
             await rcon.connect();
@@ -350,6 +385,34 @@ describe("RCON", () => {
             expect(result.isErr()).toBe(true);
         });
 
+        it("keeps processing the queue after a command fails to be written", async () => {
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            await rcon.connect();
+
+            const socket = (rcon as unknown as { socket: Socket }).socket;
+            const realWrite = socket.write.bind(socket) as (data: Buffer, cb: (err?: Error) => void) => boolean;
+            let failNext = true;
+            socket.write = ((data: Buffer, cb: (err?: Error) => void) => {
+                if (failNext) {
+                    failNext = false;
+                    process.nextTick(cb, new Error("boom"));
+                    return true;
+                }
+                return realWrite(data, cb);
+            }) as Socket["write"];
+
+            const results = await Promise.all([
+                //
+                rcon.sendCommand("a"),
+                rcon.sendCommand("b"),
+                rcon.sendCommand("c"),
+            ]);
+
+            expect(results[0]._unsafeUnwrapErr()).toMatch(/boom/);
+            expect(results[1]._unsafeUnwrap()).toBe("echo:b");
+            expect(results[2]._unsafeUnwrap()).toBe("echo:c");
+        });
+
         it("rejects queued commands if the server closes the connection", async () => {
             const rcon = new RCON("127.0.0.1", port, "correct-password");
             expect((await rcon.connect()).isOk()).toBe(true);
@@ -388,6 +451,99 @@ describe("RCON", () => {
             expect(result.isErr()).toBe(true);
             expect(result._unsafeUnwrapErr()).toMatch(/invalid packet size/i);
             expect(rcon.currentState).toBe("closed");
+        });
+    });
+
+    // ---------------------------------------------------------------------
+    // multi-packet responses
+    // ---------------------------------------------------------------------
+    describe("multiPacketResponses", () => {
+        it("joins a response split across several packets", async () => {
+            server.responseChunkSize = 3;
+            const rcon = new RCON("127.0.0.1", port, "correct-password", { multiPacketResponses: true });
+            await rcon.connect();
+            const unexpected = vi.fn();
+            rcon.on("unexpectedPacket", unexpected);
+
+            const results = await Promise.all([
+                //
+                rcon.sendCommand("hello world"),
+                rcon.sendCommand("second"),
+            ]);
+
+            expect(results.map((r) => r._unsafeUnwrap())).toEqual(["echo:hello world", "echo:second"]);
+            expect(unexpected).not.toHaveBeenCalled();
+        });
+
+        it("handles an empty response", async () => {
+            const rcon = new RCON("127.0.0.1", port, "correct-password", { multiPacketResponses: true });
+            await rcon.connect();
+            server.onPacket = (socket, packet) => {
+                if (packet.type === PacketType.SERVERDATA_EXECCOMMAND) return; // command produces no output
+                const mirror = Packet.fromBuffer(PacketType.SERVERDATA_RESPONSE_VALUE, Buffer.alloc(0));
+                socket.write(server.encodeWithId(mirror, packet.id));
+            };
+
+            const result = await rcon.sendCommandRaw("silent");
+
+            expect(result.isOk()).toBe(true);
+            expect(result._unsafeUnwrap().payload.length).toBe(0);
+        });
+
+        it("is disabled by default: extra packets are reported as unexpected", async () => {
+            server.responseChunkSize = 3;
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            await rcon.connect();
+            const unexpected = vi.fn();
+            rcon.on("unexpectedPacket", unexpected);
+
+            const result = await rcon.sendCommand("hello");
+            await new Promise((resolve) => setTimeout(resolve, 50));
+
+            expect(result._unsafeUnwrap()).toBe("ech");
+            expect(unexpected).toHaveBeenCalled();
+        });
+    });
+
+    // ---------------------------------------------------------------------
+    // events
+    // ---------------------------------------------------------------------
+    describe("events", () => {
+        it("emits 'socketError' instead of logging to the console", async () => {
+            const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            await rcon.connect();
+            const onSocketError = vi.fn();
+            rcon.on("socketError", onSocketError);
+
+            server.onPacket = (socket) => {
+                const header = Buffer.alloc(4);
+                header.writeInt32LE(-4);
+                socket.write(header);
+            };
+            await rcon.sendCommand("bad-size");
+
+            expect(onSocketError).toHaveBeenCalledWith(expect.objectContaining({ message: "Invalid packet size: -4" }));
+            expect(consoleError).not.toHaveBeenCalled();
+            consoleError.mockRestore();
+        });
+
+        it("emits 'unexpectedPacket' instead of logging to the console", async () => {
+            const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            await rcon.connect();
+            const unexpected = vi.fn();
+            rcon.on("unexpectedPacket", unexpected);
+
+            for (const socket of server.connections) {
+                const stray = Packet.fromBuffer(PacketType.SERVERDATA_RESPONSE_VALUE, Buffer.from("stray"));
+                socket.write(server.encodeWithId(stray, 424242));
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+
+            expect(unexpected).toHaveBeenCalledWith(expect.objectContaining({ id: 424242 }));
+            expect(consoleWarn).not.toHaveBeenCalled();
+            consoleWarn.mockRestore();
         });
     });
 

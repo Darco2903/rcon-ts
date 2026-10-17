@@ -25,6 +25,9 @@ export class FakeRconServer {
      */
     public sendEmptyBeforeAuth: boolean = true;
 
+    /** When set, command responses are split into packets of at most this many payload bytes. */
+    public responseChunkSize: number | null = null;
+
     public constructor() {
         this.server = createServer((socket) => {
             this.connections.push(socket);
@@ -61,11 +64,22 @@ export class FakeRconServer {
         }
 
         if (packet.type === PacketType.SERVERDATA_EXECCOMMAND) {
-            const response = Packet.fromBuffer(
-                PacketType.SERVERDATA_RESPONSE_VALUE,
-                Buffer.from(`echo:${packet.payload.toString("utf8")}`, "utf8"),
-            );
-            socket.write(this.encodeWithId(response, packet.id));
+            const body = Buffer.from(`echo:${packet.payload.toString("utf8")}`, "utf8");
+            const chunkSize = this.responseChunkSize ?? Math.max(body.length, 1);
+            for (let i = 0; i === 0 || i < body.length; i += chunkSize) {
+                const chunk = body.subarray(i, i + chunkSize);
+                const response = Packet.fromBuffer(PacketType.SERVERDATA_RESPONSE_VALUE, chunk);
+                socket.write(this.encodeWithId(response, packet.id));
+            }
+            return;
+        }
+
+        // Like Source: an empty SERVERDATA_RESPONSE_VALUE is mirrored back, followed by a junk packet.
+        if (packet.type === PacketType.SERVERDATA_RESPONSE_VALUE) {
+            const mirror = Packet.fromBuffer(PacketType.SERVERDATA_RESPONSE_VALUE, Buffer.alloc(0));
+            const junk = Packet.fromBuffer(PacketType.SERVERDATA_RESPONSE_VALUE, Buffer.from([0, 0, 0, 1]));
+            socket.write(this.encodeWithId(mirror, packet.id));
+            socket.write(this.encodeWithId(junk, packet.id));
             return;
         }
     }

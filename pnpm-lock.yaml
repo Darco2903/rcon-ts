@@ -166,6 +166,9 @@ importers:
 
   .:
     dependencies:
+      '@darco2903/typed-emitter':
+        specifier: ^1.3.1
+        version: 1.3.1(@darco2903/secondthought@1.3.1)
       neverthrow:
         specifier: ^8.2.0
         version: 8.2.0
@@ -187,6 +190,14 @@ importers:
         version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15))
 
 packages:
+
+  '@darco2903/secondthought@1.3.1':
+    resolution: {integrity: sha512-V9VInslaMATdTHjju9pNrrduFxW3Qz8us3h1pEkpEFdNTor3fp7nbm+zJS9/+P6r7//6j9SmXp832ruK3mc3rw==}
+
+  '@darco2903/typed-emitter@1.3.1':
+    resolution: {integrity: sha512-f0/TFgQQt6P7htSR7Zc7ZEtsMWu+Nqf31hnlbfhl0aV2sZHi3zMVfLehQsvPMz5vzhfjCTTsKqi09Of+VBSYCw==}
+    peerDependencies:
+      '@darco2903/secondthought': ^1.1.0
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -819,6 +830,13 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@darco2903/secondthought@1.3.1': {}
+
+  '@darco2903/typed-emitter@1.3.1(@darco2903/secondthought@1.3.1)':
+    dependencies:
+      '@darco2903/secondthought': 1.3.1
+      neverthrow: 8.2.0
 
   '@esbuild/aix-ppc64@0.28.2':
     optional: true

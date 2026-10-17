@@ -1,1 +1,1 @@
-export type RCONState = "idle" | "connecting" | "ready" | "closed";
+export type RCONState = "idle" | "connecting" | "ready" | "closing" | "closed";

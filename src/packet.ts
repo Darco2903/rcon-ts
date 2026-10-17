@@ -21,6 +21,12 @@ export class Packet {
         return Packet.fromBuffer(type, Buffer.from(payload, "utf8"));
     }
 
+    /** Joins the payloads of a response split across several packets. */
+    public static merge(id: number, packets: Packet[]): Packet {
+        const type = packets[0]?.type ?? PacketType.SERVERDATA_RESPONSE_VALUE;
+        return new Packet(id, type, Buffer.concat(packets.map((p) => p.payload)));
+    }
+
     private constructor(id: number, type: PacketType, payload: Buffer) {
         this.id = id;
         this.type = type;

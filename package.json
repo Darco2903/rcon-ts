@@ -24,6 +24,7 @@
     "clean": "rimraf -g dist darco2903-rcon-ts-*.tgz"
   },
   "dependencies": {
+    "@darco2903/typed-emitter": "^1.3.1",
     "neverthrow": "^8.2.0"
   },
   "devDependencies": {
