@@ -1,6 +1,6 @@
 {
   "name": "@darco2903/rcon-ts",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Darco2903",
   "description": "Minimal TypeScript client for the Source RCON protocol (Source engine games, Minecraft, ...), built on neverthrow",
   "keywords": [
