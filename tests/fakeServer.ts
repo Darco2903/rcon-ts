@@ -19,6 +19,12 @@ export class FakeRconServer {
     /** Expected password for the default authentication response. */
     public expectedPassword: string = "correct-password";
 
+    /**
+     * Mimics Source servers, which send an empty SERVERDATA_RESPONSE_VALUE right before the auth response.
+     * Set to `false` to behave like Minecraft, which only sends the auth response.
+     */
+    public sendEmptyBeforeAuth: boolean = true;
+
     public constructor() {
         this.server = createServer((socket) => {
             this.connections.push(socket);
@@ -46,6 +52,10 @@ export class FakeRconServer {
             const ok = packet.payload.toString("utf8") === this.expectedPassword;
             const response = Packet.fromBuffer(PacketType.SERVERDATA_AUTH_RESPONSE, Buffer.alloc(0));
             const forcedId = ok ? packet.id : -1;
+            if (this.sendEmptyBeforeAuth) {
+                const empty = Packet.fromBuffer(PacketType.SERVERDATA_RESPONSE_VALUE, Buffer.alloc(0));
+                socket.write(this.encodeWithId(empty, packet.id));
+            }
             socket.write(this.encodeWithId(response, forcedId));
             return;
         }
@@ -61,7 +71,7 @@ export class FakeRconServer {
     }
 
     /** Allows forcing a different response ID (useful for simulating authentication failure with id=-1). */
-    private encodeWithId(packet: Packet, id: number): Buffer {
+    public encodeWithId(packet: Packet, id: number): Buffer {
         const encoded = packet.encode();
         encoded.writeInt32LE(id, 4);
         return encoded;

@@ -2,40 +2,48 @@ import { Socket } from "net";
 import { errAsync, okAsync, ResultAsync } from "neverthrow";
 import { Packet } from "./packet.js";
 import { SplitterTransform } from "./SplitterTransform.js";
+import type { RCONOptions } from "./types/RCONOptions.js";
 import type { RCONState } from "./types/RCONState.js";
 import { PacketType } from "./types/PacketType.js";
 
 type PendingCommand = { id: number; resolve: (p: Packet) => void; reject: (e: string) => void };
 type PendingPacket = { packet: Packet; resolve: (p: Packet) => void; reject: (e: string) => void };
+type PendingConnect = {
+    /** Id of the auth packet, `null` until the TCP connection is established. */
+    authId: number | null;
+    timer: ReturnType<typeof setTimeout>;
+    resolve: () => void;
+    reject: (e: string) => void;
+};
+
+const DEFAULT_CONNECT_TIMEOUT = 10_000;
 
 export class RCON {
     public readonly host: string;
     public readonly port: number;
     private readonly password: string;
+    private readonly connectTimeout: number;
 
     private socket: Socket | null;
     private state: RCONState;
 
+    private connecting: PendingConnect | null;
     private queue: PendingPacket[];
     private pending: PendingCommand | null;
 
-    private readonly boundHandlePacket: (data: Buffer) => void;
-    private readonly boundOnSocketError: (err: Error) => void;
-    private readonly boundHandleClose: () => void;
-    private splitter: SplitterTransform | null = null;
+    private teardownSocketListeners: (() => void) | null;
 
-    public constructor(host: string, port: number, password: string) {
+    public constructor(host: string, port: number, password: string, options: RCONOptions = {}) {
         this.host = host;
         this.port = port;
         this.password = password;
+        this.connectTimeout = options.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT;
         this.socket = null;
         this.state = "idle";
+        this.connecting = null;
         this.queue = [];
         this.pending = null;
-        this.boundHandlePacket = this.handlePacket.bind(this);
-        this.boundOnSocketError = this.onSocketError.bind(this);
-        this.boundHandleClose = this.handleClose.bind(this);
-        this.splitter = null;
+        this.teardownSocketListeners = null;
     }
 
     public get currentState(): RCONState {
@@ -55,38 +63,43 @@ export class RCON {
 
         this.state = "connecting";
         const socket = (this.socket = new Socket());
+        this.setupSocketListeners(socket);
 
         return ResultAsync.fromPromise(
             new Promise<void>((resolve, reject) => {
-                socket.once("error", reject);
-                socket.connect(this.port, this.host, () => {
-                    socket.off("error", reject);
-                    resolve();
-                });
+                const timer = setTimeout(() => {
+                    this.closeConnection(socket, `timed out after ${this.connectTimeout}ms`);
+                }, this.connectTimeout);
+                const attempt: PendingConnect = { authId: null, timer, resolve, reject };
+                this.connecting = attempt;
+
+                try {
+                    socket.connect(this.port, this.host, () => {
+                        const packet = Packet.fromString(PacketType.SERVERDATA_AUTH, this.password);
+                        attempt.authId = packet.id;
+                        this._write(packet, socket).orTee((e) => this.closeConnection(socket, e));
+                    });
+                } catch (e) {
+                    this.closeConnection(socket, e instanceof Error ? e.message : String(e));
+                }
             }),
-            (e) => `Failed to connect to RCON server: ${e instanceof Error ? e.message : String(e)}`,
-        )
-            .andThen(() => this.auth(this.password))
-            .andTee(() => {
-                this.setupSocketListeners(socket);
-                this.state = "ready";
-            })
-            .orTee(() => {
-                socket.destroy();
-                this.state = "closed";
-            });
+            (e) => String(e),
+        );
     }
 
     public disconnect(): ResultAsync<void, string> {
         if (this.state === "closed") {
             return errAsync("RCON is already disconnected");
-        } else if (this.state === "connecting") {
-            return errAsync("RCON is currently connecting, cannot disconnect");
         }
 
         const socket = this.socket;
         if (socket === null) {
             return errAsync("Socket is not initialized");
+        }
+
+        if (this.state === "connecting") {
+            this.closeConnection(socket, "cancelled by disconnect()");
+            return okAsync();
         }
 
         return ResultAsync.fromPromise(
@@ -98,7 +111,7 @@ export class RCON {
                 });
             }),
             (e) => `Failed to disconnect from RCON server: ${e instanceof Error ? e.message : String(e)}`,
-        ).andTee(() => this.handleClose());
+        ).andTee(() => this.closeConnection(socket, "disconnected"));
     }
 
     public sendCommandRaw(command: string): ResultAsync<Packet, string> {
@@ -128,89 +141,114 @@ export class RCON {
         return this.sendCommandRaw(command).map((packet) => packet.payload.toString("utf8"));
     }
 
-    private onSocketError(err: Error): void {
-        console.error("RCON socket error:", err.message);
-    }
-
     private setupSocketListeners(socket: Socket): void {
-        this.splitter = new SplitterTransform();
+        const splitter = new SplitterTransform();
+        let lastError: Error | null = null;
+
+        const onPacket = (data: Buffer) => this.handlePacket(data);
+        const onSplitterError = (err: Error) => socket.destroy(err);
+        const onError = (err: Error) => {
+            lastError = err;
+            if (this.state === "ready") {
+                console.error("RCON socket error:", err.message);
+            }
+        };
+        const onClose = () => this.closeConnection(socket, lastError?.message ?? "closed by server");
+
         socket
             //
-            .pipe(this.splitter)
-            .on("data", this.boundHandlePacket);
+            .pipe(splitter)
+            .on("data", onPacket)
+            .on("error", onSplitterError);
 
-        socket.on("error", this.boundOnSocketError);
-        socket.once("close", this.boundHandleClose);
+        socket.on("error", onError);
+        socket.once("close", onClose);
+
+        this.teardownSocketListeners = () => {
+            socket.off("close", onClose);
+            socket.unpipe(splitter);
+            splitter.off("data", onPacket);
+            // `onError` stays attached so late errors from the destroyed socket don't crash the process.
+        };
     }
 
-    private teardownSocketListeners(): void {
-        if (this.socket !== null) {
-            this.socket.off("close", this.boundHandleClose);
-            if (this.splitter !== null) {
-                this.socket.unpipe(this.splitter);
-                this.splitter.off("data", this.boundHandlePacket);
-            }
+    /**
+     * Destroys `socket` and fails everything waiting on it: the connect attempt, the pending
+     * command and the queued ones. No-op if `socket` is no longer the active socket.
+     */
+    private closeConnection(socket: Socket, reason: string): void {
+        if (socket !== this.socket) {
+            return;
         }
-        this.splitter = null;
-    }
 
-    private handleClose(): void {
-        this.teardownSocketListeners();
         this.socket = null;
         this.state = "closed";
-        this.reset();
+        this.teardownSocketListeners?.();
+        this.teardownSocketListeners = null;
+        socket.destroy();
+
+        if (this.connecting !== null) {
+            const { authId, timer, reject } = this.connecting;
+            clearTimeout(timer);
+            this.connecting = null;
+            reject(
+                authId === null
+                    ? `Failed to connect to RCON server: ${reason}`
+                    : `Failed to authenticate: ${reason}`,
+            );
+        }
+
+        this.rejectAll(`RCON connection closed: ${reason}`);
     }
 
-    private reset(): void {
+    private rejectAll(reason: string): void {
+        const pending = this.pending;
+        const queue = this.queue;
+        this.pending = null;
         this.queue = [];
-        if (this.pending) {
-            this.pending.reject("RCON connection closed");
-            this.pending = null;
+
+        pending?.reject(reason);
+        for (const { reject } of queue) {
+            reject(reason);
         }
-    }
-
-    private auth(password: string): ResultAsync<void, string> {
-        const socket = this.socket;
-        const packet = Packet.fromString(PacketType.SERVERDATA_AUTH, password);
-
-        if (socket === null) {
-            return errAsync("Socket is not initialized");
-        }
-
-        const p = ResultAsync.fromPromise(
-            new Promise<Packet>((resolve, reject) => {
-                const onData = (data: Buffer) => {
-                    socket.off("error", onError);
-                    resolve(Packet.decode(data));
-                };
-
-                const onError = (err: Error) => {
-                    socket.off("data", onData);
-                    reject(err);
-                };
-
-                socket.once("data", onData);
-                socket.once("error", onError);
-            }),
-            (e) => `Failed to authenticate: ${e instanceof Error ? e.message : String(e)}`,
-        ).andThen((packet) => {
-            if (packet.type !== PacketType.SERVERDATA_AUTH_RESPONSE || packet.id === -1) {
-                return errAsync("Failed to authenticate with RCON server.");
-            }
-            return okAsync();
-        });
-        return this._write(packet, socket).andThen(() => p);
     }
 
     private handlePacket(data: Buffer): void {
         const packet = Packet.decode(data);
 
-        if (this.pending !== null && this.pending.id === packet.id) {
+        if (this.connecting !== null) {
+            this.handleAuthPacket(packet, this.connecting);
+        } else if (this.pending !== null && this.pending.id === packet.id) {
             const { resolve } = this.pending;
             resolve(packet);
             this.sendNext();
         } else {
             console.warn(`Unexpected packet id: ${packet.id}`);
+        }
+    }
+
+    private handleAuthPacket(packet: Packet, attempt: PendingConnect): void {
+        const socket = this.socket;
+        if (socket === null) {
+            return;
+        }
+
+        // Source servers send an empty SERVERDATA_RESPONSE_VALUE right before the auth response.
+        if (packet.type === PacketType.SERVERDATA_RESPONSE_VALUE) {
+            return;
+        }
+
+        if (packet.type !== PacketType.SERVERDATA_AUTH_RESPONSE) {
+            this.closeConnection(socket, `unexpected packet type ${packet.type}`);
+        } else if (packet.id === -1) {
+            this.closeConnection(socket, "wrong password");
+        } else if (packet.id !== attempt.authId) {
+            this.closeConnection(socket, `unexpected packet id ${packet.id}`);
+        } else {
+            clearTimeout(attempt.timer);
+            this.connecting = null;
+            this.state = "ready";
+            attempt.resolve();
         }
     }
 

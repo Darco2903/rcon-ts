@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RCON } from "../../src/RCON.js";
 import { Packet } from "../../src/packet.js";
+import { MAX_PACKET_SIZE } from "../../src/SplitterTransform.js";
 import { PacketType } from "../../src/types/PacketType.js";
 import { FakeRconServer } from "../fakeServer.js";
 
@@ -85,6 +86,80 @@ describe("RCON", () => {
             expect(second.isOk()).toBe(true);
             expect(rcon.currentState).toBe("ready");
         });
+
+        it("authenticates against a server that only sends the auth response (Minecraft-style)", async () => {
+            server.sendEmptyBeforeAuth = false;
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+
+            const result = await rcon.connect();
+
+            expect(result.isOk()).toBe(true);
+            expect(rcon.currentState).toBe("ready");
+        });
+
+        it("authenticates when the auth response arrives fragmented across many reads", async () => {
+            server.onPacket = (socket, packet) => {
+                if (packet.type !== PacketType.SERVERDATA_AUTH) return;
+                socket.setNoDelay(true);
+                const bytes = Buffer.concat([
+                    server.encodeWithId(
+                        Packet.fromBuffer(PacketType.SERVERDATA_RESPONSE_VALUE, Buffer.alloc(0)),
+                        packet.id,
+                    ),
+                    server.encodeWithId(
+                        Packet.fromBuffer(PacketType.SERVERDATA_AUTH_RESPONSE, Buffer.alloc(0)),
+                        packet.id,
+                    ),
+                ]);
+                bytes.forEach((byte, i) => setTimeout(() => socket.write(Buffer.from([byte])), i));
+            };
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+
+            const result = await rcon.connect();
+
+            expect(result.isOk()).toBe(true);
+            expect(rcon.currentState).toBe("ready");
+        });
+
+        it("fails if the auth response id does not match the auth request id", async () => {
+            server.onPacket = (socket, packet) => {
+                const response = Packet.fromBuffer(PacketType.SERVERDATA_AUTH_RESPONSE, Buffer.alloc(0));
+                socket.write(server.encodeWithId(response, packet.id + 1000));
+            };
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+
+            const result = await rcon.connect();
+
+            expect(result.isErr()).toBe(true);
+            expect(result._unsafeUnwrapErr()).toMatch(/unexpected packet id/i);
+            expect(rcon.currentState).toBe("closed");
+        });
+
+        it("fails if the server closes the connection during authentication", async () => {
+            server.onPacket = (socket) => {
+                socket.destroy();
+            };
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+
+            const result = await rcon.connect();
+
+            expect(result.isErr()).toBe(true);
+            expect(result._unsafeUnwrapErr()).toMatch(/failed to authenticate/i);
+            expect(rcon.currentState).toBe("closed");
+        });
+
+        it("times out if the server never answers the auth request", async () => {
+            server.onPacket = () => {
+                /* does not reply */
+            };
+            const rcon = new RCON("127.0.0.1", port, "correct-password", { connectTimeout: 100 });
+
+            const result = await rcon.connect();
+
+            expect(result.isErr()).toBe(true);
+            expect(result._unsafeUnwrapErr()).toMatch(/timed out/i);
+            expect(rcon.currentState).toBe("closed");
+        });
     });
 
     // ---------------------------------------------------------------------
@@ -123,16 +198,18 @@ describe("RCON", () => {
             expect(result._unsafeUnwrapErr()).toMatch(/already disconnected/i);
         });
 
-        it("returns an error if disconnecting while in the 'connecting' state", async () => {
+        it("cancels an in-progress connect() when disconnecting while in the 'connecting' state", async () => {
             const rcon = new RCON("127.0.0.1", port, "correct-password");
 
             const connectPromise = rcon.connect();
             const disconnectResult = await rcon.disconnect();
 
-            expect(disconnectResult.isErr()).toBe(true);
-            expect(disconnectResult._unsafeUnwrapErr()).toMatch(/currently connecting/i);
+            expect(disconnectResult.isOk()).toBe(true);
+            expect(rcon.currentState).toBe("closed");
 
-            await connectPromise;
+            const connectResult = await connectPromise;
+            expect(connectResult.isErr()).toBe(true);
+            expect(connectResult._unsafeUnwrapErr()).toMatch(/cancelled/i);
         });
 
         it("rejects pending commands during disconnection", async () => {
@@ -151,6 +228,23 @@ describe("RCON", () => {
 
             const result = await commandPromise;
             expect(result.isErr()).toBe(true);
+        });
+
+        it("rejects queued commands during disconnection", async () => {
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            await rcon.connect();
+
+            server.onPacket = () => {
+                /* does not reply */
+            };
+
+            const commands = [rcon.sendCommand("a"), rcon.sendCommand("b"), rcon.sendCommand("c")];
+            const disconnectResult = await rcon.disconnect();
+
+            expect(disconnectResult.isOk()).toBe(true);
+
+            const results = await Promise.all(commands);
+            expect(results.every((r) => r.isErr())).toBe(true);
         });
     });
 
@@ -254,6 +348,46 @@ describe("RCON", () => {
             const result = await rcon.sendCommand("will-fail");
 
             expect(result.isErr()).toBe(true);
+        });
+
+        it("rejects queued commands if the server closes the connection", async () => {
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            expect((await rcon.connect()).isOk()).toBe(true);
+
+            server.onPacket = (socket) => {
+                socket.destroy();
+            };
+
+            const results = await Promise.all([
+                //
+                rcon.sendCommand("a"),
+                rcon.sendCommand("b"),
+                rcon.sendCommand("c"),
+            ]);
+
+            expect(results.every((r) => r.isErr())).toBe(true);
+        });
+
+        it.each([
+            ["negative", -4],
+            ["zero", 0],
+            ["below the minimum", 9],
+            ["above the maximum", MAX_PACKET_SIZE + 1],
+        ])("closes the connection on a packet with a %s size field", async (_, size) => {
+            const rcon = new RCON("127.0.0.1", port, "correct-password");
+            await rcon.connect();
+
+            server.onPacket = (socket) => {
+                const header = Buffer.alloc(4);
+                header.writeInt32LE(size);
+                socket.write(header);
+            };
+
+            const result = await rcon.sendCommand("bad-size");
+
+            expect(result.isErr()).toBe(true);
+            expect(result._unsafeUnwrapErr()).toMatch(/invalid packet size/i);
+            expect(rcon.currentState).toBe("closed");
         });
     });
 
